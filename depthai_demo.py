@@ -9,11 +9,15 @@ from functools import cmp_to_key
 from itertools import cycle
 from pathlib import Path
 
+sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages')
 import cv2
 os.environ["DEPTHAI_INSTALL_SIGNAL_HANDLER"] = "0"
 import depthai as dai
 import platform
 import numpy as np
+
+import PID_control
+from pymycobot.mycobot import MyCobot
 
 from depthai_helpers.arg_manager import parseArgs
 from depthai_helpers.config_manager import ConfigManager, DEPTHAI_ZOO, DEPTHAI_VIDEOS
@@ -49,6 +53,28 @@ class Trackbars:
 
 noop = lambda *a, **k: None
 
+pidX = PID_control.PID(10, 10, 3.75)
+pidY = PID_control.PID(6.5, 5, 2.5)
+pidZ = PID_control.PID(50, 30, 20)
+pidX.setTargetPosition(0.5)
+pidY.setTargetPosition(0.5)
+pidZ.setTargetPosition(0.5)
+
+def rotate(theta, psi, r):
+    mc.set_color(255,0,0)
+    mc.sync_send_angles([psi,r,-r,theta,0,90],100, timeout=0.001)
+
+def guard(deg, threshhold):
+    if deg >= threshhold:
+        deg = threshhold
+    elif deg <= -threshhold:
+        deg =-threshhold
+    else:
+        pass
+    return deg
+
+mc = MyCobot('/dev/ttyAMA0',1000000)
+rotate(0, -60, 0)
 
 class Demo:
     DISP_CONF_MIN = int(os.getenv("DISP_CONF_MIN", 0))
@@ -75,6 +101,11 @@ class Demo:
         self.onTeardown = onTeardown
         self.onIter = onIter
         self.shouldRun = shouldRun
+
+        self.theta = 0
+        self.psi = -60
+        self.r = 0
+
     
     def setCallbacks(self, onNewFrame=None, onShowFrame=None, onNn=None, onReport=None, onSetup=None, onTeardown=None, onIter=None, shouldRun=None):
         if onNewFrame is not None:
@@ -121,7 +152,7 @@ class Demo:
         if self._conf.useNN:
             self._blobManager = BlobManager(
                 zooDir=DEPTHAI_ZOO,
-                zooName=self._conf.getModelName(),
+                zooName='face-detection-retail-0004',
             )
             self._nnManager = NNetManager(inputSize=self._conf.inputSize)
 
@@ -321,6 +352,28 @@ class Demo:
                     self._hostFrame = Previews.nnInput.value(self._hostOut.get())
                 self._nnData = self._nnManager.decode(inNn)
                 self._fps.tick('nn')
+
+        if self._conf.useNN:
+            if inNn is not None:
+                try:
+                    x = (self._nnData[0].xmin + self._nnData[0].xmax) / 2
+                    y = (self._nnData[0].ymin + self._nnData[0].ymax) / 2
+                    z = int(self._nnData[0].spatialCoordinates.z) / 1000
+                    #print(x, y, z)
+                    pidX.update(x)
+                    pidY.update(y)
+                    pidZ.update(z)
+                    self.psi += pidX.output
+                    self.theta += pidY.output
+                    self.r += pidZ.output
+
+                    self.psi = guard(self.psi, 90)
+                    self.theta = guard(self.theta, 160)
+                    self.r = guard(self.r, 90)
+
+                    rotate(self.theta, self.psi, self.r)
+                except IndexError:
+                    pass
 
         if self._conf.useCamera:
             if self._nnManager is not None:
